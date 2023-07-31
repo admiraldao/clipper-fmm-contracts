@@ -1,4 +1,5 @@
-//SPDX-License-Identifier: Copyright 2021 Shipyard Software, Inc.
+// SPDX-License-Identifier: UNLICENSED
+// Copyright 2023 Shipyard Software, Inc.
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -16,6 +17,16 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
   using SafeERC20 for IERC20;
   using EnumerableSet for EnumerableSet.AddressSet;
 
+  // Check for triage on swaps, deposits, and single-asset withdrawals
+  error ClipperTradeHalted();
+  
+  modifier marketIsRunning {
+    if(isTradeHalted()){
+      revert ClipperTradeHalted();
+    }
+    _;
+  }
+
   modifier receivedInTime(uint256 goodUntil){
     require(block.timestamp <= goodUntil, "Clipper: Expired");
     _;
@@ -24,6 +35,10 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
   constructor(address theSigner, address theWrapper, address[] memory tokens)
     ClipperCommonExchange(theSigner, theWrapper, tokens)
     {}
+
+  function isTradeHalted() public view virtual returns (bool) {
+    return false;
+  }
 
   function addAsset(address token) external onlyOwner {
     assetSet.add(token);
@@ -36,7 +51,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
     return abi.decode(data, (uint256));
   }
 
-  function _sync(address token) internal override {
+  function _sync(address token) internal virtual override {
     setBalance(token, tokenBalance(token));
   }
 
@@ -52,27 +67,27 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
     return (uint256(newHash) << 224) + uint256(newBalance.toUint224());
   }
 
-  function setBalance(address token, uint256 newBalance) internal {
+  function setBalance(address token, uint256 newBalance) internal virtual {
     (uint32 newHash, ) = confirmUnique(token);
     lastBalances[token] = makeWriteValue(newHash, newBalance);
   }
 
-  function increaseBalance(address token, uint256 increaseAmount) internal {
+  function increaseBalance(address token, uint256 increaseAmount) internal virtual {
     (uint32 newHash, uint256 curBalance) = confirmUnique(token);
     lastBalances[token] = makeWriteValue(newHash, curBalance+increaseAmount);
   }
 
-  function decreaseBalance(address token, uint256 decreaseAmount) internal {
+  function decreaseBalance(address token, uint256 decreaseAmount) internal virtual {
     (uint32 newHash, uint256 curBalance) = confirmUnique(token);
     lastBalances[token] = makeWriteValue(newHash, curBalance-decreaseAmount);
   }
 
-  function getLastBalance(address token) public view override returns (uint256) {
+  function getLastBalance(address token) public view virtual override returns (uint256) {
     return uint256(uint224(lastBalances[token]));
   }
 
   // Can deposit raw ETH by attaching as msg.value
-  function deposit(address sender, uint256[] calldata depositAmounts, uint256 nDays, uint256 poolTokens, uint256 goodUntil, Signature calldata theSignature) public payable override receivedInTime(goodUntil){
+  function deposit(address sender, uint256[] calldata depositAmounts, uint256 nDays, uint256 poolTokens, uint256 goodUntil, Signature calldata theSignature) public payable override marketIsRunning receivedInTime(goodUntil){
     if(msg.value > 0){
       safeEthSend(WRAPPER_CONTRACT, msg.value);
     }
@@ -100,7 +115,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
     emit Deposited(sender, poolTokens, nDays);
   }
 
-  function depositSingleAsset(address sender, address inputToken, uint256 inputAmount, uint256 nDays, uint256 poolTokens, uint256 goodUntil, Signature calldata theSignature) public payable override receivedInTime(goodUntil){
+  function depositSingleAsset(address sender, address inputToken, uint256 inputAmount, uint256 nDays, uint256 poolTokens, uint256 goodUntil, Signature calldata theSignature) public payable override marketIsRunning receivedInTime(goodUntil){
     if(msg.value > 0){
       safeEthSend(WRAPPER_CONTRACT, msg.value);
     }
@@ -127,7 +142,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
   
   /* Single asset withdrawal functionality */
 
-  function withdrawSingleAsset(address tokenHolder, uint256 poolTokenAmountToBurn, address assetAddress, uint256 assetAmount, uint256 goodUntil, Signature calldata theSignature) external override receivedInTime(goodUntil) {
+  function withdrawSingleAsset(address tokenHolder, uint256 poolTokenAmountToBurn, address assetAddress, uint256 assetAmount, uint256 goodUntil, Signature calldata theSignature) external override marketIsRunning receivedInTime(goodUntil) {
     /* CHECKS */
     require(msg.sender==tokenHolder, "tokenHolder does not match msg.sender");
     
@@ -164,7 +179,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
   // Don't need a separate "transmit" function here since it's already payable
   // Gas optimized - no balance checks
   // Don't need fairOutput checks since exactly inputAmount is wrapped
-  function sellEthForToken(address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external override receivedInTime(goodUntil) payable {
+  function sellEthForToken(address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external virtual override marketIsRunning receivedInTime(goodUntil) payable {
     /* CHECKS */
     require(isToken(outputToken), "Clipper: Invalid token");
     // Wrap ETH (as balance or value) as input. This will revert if insufficient balance is provided
@@ -184,7 +199,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
   }
 
   // Mostly copied from gas-optimized swap functionality
-  function sellTokenForEth(address inputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external override receivedInTime(goodUntil) {
+  function sellTokenForEth(address inputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external virtual override marketIsRunning receivedInTime(goodUntil) {
     /* CHECKS */
     require(isToken(inputToken), "Clipper: Invalid token");
     // Revert if it's signed by the wrong address    
@@ -209,7 +224,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
     emit Swapped(inputToken, WRAPPER_CONTRACT, destinationAddress, actualInput, fairOutput, auxiliaryData);
   }
 
-  function transmitAndDepositSingleAsset(address inputToken, uint256 inputAmount, uint256 nDays, uint256 poolTokens, uint256 goodUntil, Signature calldata theSignature) external override receivedInTime(goodUntil){
+  function transmitAndDepositSingleAsset(address inputToken, uint256 inputAmount, uint256 nDays, uint256 poolTokens, uint256 goodUntil, Signature calldata theSignature) external virtual override marketIsRunning receivedInTime(goodUntil){
     // Make sure the depositor is allowed
     require(isToken(inputToken), "Invalid input");
 
@@ -231,7 +246,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
 
   // Gas optimized, no balance checks
   // No need to check fairOutput since the inputToken pull works
-  function transmitAndSellTokenForEth(address inputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external override receivedInTime(goodUntil) {
+  function transmitAndSellTokenForEth(address inputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external virtual override marketIsRunning receivedInTime(goodUntil) {
     /* CHECKS */
     require(isToken(inputToken), "Clipper: Invalid token");
     // Will revert if msg.sender has insufficient balance
@@ -255,7 +270,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
   // all-in-one transfer from msg.sender to destinationAddress.
   // Gas optimized - never checks balances
   // No need to check fairOutput since the inputToken pull works
-  function transmitAndSwap(address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external override receivedInTime(goodUntil) {
+  function transmitAndSwap(address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) external virtual override marketIsRunning receivedInTime(goodUntil) {
     /* CHECKS */
     require(isToken(inputToken) && isToken(outputToken), "Clipper: Invalid tokens");
     // Will revert if msg.sender has insufficient balance
@@ -276,7 +291,7 @@ contract ClipperCaravelExchange is ClipperCommonExchange, Ownable {
 
   // Gas optimized - single token balance check for input
   // output is dead-reckoned and scaled back if necessary
-  function swap(address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) public override receivedInTime(goodUntil) {
+  function swap(address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 goodUntil, address destinationAddress, Signature calldata theSignature, bytes calldata auxiliaryData) public virtual override marketIsRunning receivedInTime(goodUntil) {
     /* CHECKS */
     require(isToken(inputToken) && isToken(outputToken), "Clipper: Invalid tokens");
 
