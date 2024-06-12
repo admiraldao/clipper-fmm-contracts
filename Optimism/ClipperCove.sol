@@ -1,4 +1,5 @@
-//SPDX-License-Identifier: Copyright 2022 Shipyard Software, Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2023 Shipyard Software, Inc.
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
